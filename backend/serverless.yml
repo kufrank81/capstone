@@ -1,0 +1,238 @@
+service:
+  name: serverless-blog-app
+
+plugins:
+  - serverless-webpack
+  - serverless-iam-roles-per-function
+  #- serverless-reqvalidator-plugin
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+
+  # enable AWS X-Ray Tracing
+  tracing:
+    lambda: true
+    apiGateway: true
+    
+  # Attention for indentation here
+  iamRoleStatements:            # Permissions here or under every function to trace
+    - Effect: 'Allow'           # xray tracing permissions
+      Action:
+        - 'xray:PutTraceSegments'             # Trace Segments
+        - 'xray:PutTelemetryRecords'          # Telemetry
+      Resource:
+        - '*'
+
+  environment:
+    BLOG_TABLE: blog-${self:provider.stage}
+    INDEX_NAME: blogIndex-${self:provider.stage}
+    BLOG_S3_BUCKET: blog-docs-${self:provider.stage}
+    SIGNED_URL_EXPIRATION: 300
+
+custom:
+  documentation:
+    api:
+      info:
+        version: v1.0.0
+        title: Blog API
+        description: Serverless application for blog (capstone project)
+
+functions:
+
+  Auth:
+    handler: src/lambda/auth/auth0Authorizer.handler
+
+  # TODO: Configure this function
+  GetBlogPosts:
+    handler: src/lambda/http/getBlogPosts.handler
+    iamRoleStatements:
+      - Effect: "Allow"        
+        Action:
+          - dynamodb:Query       
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BLOG_TABLE}/index/${self:provider.environment.INDEX_NAME}
+    events:
+      - http:
+          method: get
+          path: blog
+          cors: true
+          authorizer: Auth
+
+  GetBlogPostsByCategory:
+    handler: src/lambda/http/getBlogPostsByCategory.handler
+    iamRoleStatements:
+      - Effect: "Allow"        
+        Action:
+          - dynamodb:Query       
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BLOG_TABLE}/index/${self:provider.environment.INDEX_NAME}
+    events:
+      - http:
+          method: get
+          path: blog/posts/{category}
+          cors: true
+          authorizer: Auth
+
+  # TODO: Configure this function
+  CreatePost:
+    handler: src/lambda/http/createPost.handler
+    iamRoleStatements:
+      - Effect: "Allow"        
+        Action:
+          - dynamodb:PutItem      
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BLOG_TABLE}
+    events:
+      - http:
+          method: post
+          path: blog
+          cors: true
+          authorizer: Auth
+          request:
+            schemas:
+              application/json: ${file(src/models/create-post-request.json)}
+
+  # TODO: Configure this function
+  UpdatePost:
+    handler: src/lambda/http/updatePost.handler
+    iamRoleStatements:
+      - Effect: "Allow"        
+        Action:
+          - dynamodb:UpdateItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BLOG_TABLE}
+      - Effect: "Allow"        
+        Action:
+          - dynamodb:Query
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BLOG_TABLE}/index/${self:provider.environment.INDEX_NAME}
+    events:
+      - http:
+          method: patch
+          path: blog/{postId}
+          cors: true
+          authorizer: Auth
+          request:
+            schemas:
+              application/json: ${file(src/models/update-post-request.json)}
+
+  # TODO: Configure this function
+  DeletePost:
+    handler: src/lambda/http/deletePost.handler
+    iamRoleStatements:
+      - Effect: "Allow"        
+        Action:
+          - dynamodb:DeleteItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BLOG_TABLE}
+      - Effect: "Allow"        
+        Action:
+          - dynamodb:Query
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BLOG_TABLE}/index/${self:provider.environment.INDEX_NAME}
+      - Effect: Allow
+        Action:
+          - s3:DeleteObject
+        Resource: arn:aws:s3:::${self:provider.environment.BLOG_S3_BUCKET}/*
+    events:
+      - http:
+          method: delete
+          path: blog/{postId}
+          cors: true
+          authorizer: Auth
+
+  # TODO: Configure this function
+  GenerateUploadUrl:
+    handler: src/lambda/http/generateUploadUrl.handler
+    iamRoleStatements:
+      - Effect: "Allow"        
+        Action:
+          - dynamodb:UpdateItem
+          - dynamodb:GetItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BLOG_TABLE}
+      - Effect: "Allow"        
+        Action:
+          - dynamodb:Query
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BLOG_TABLE}/index/${self:provider.environment.INDEX_NAME}
+      - Effect: Allow
+        Action:
+          - s3:PutObject
+          - s3:GetObject
+        Resource: arn:aws:s3:::${self:provider.environment.BLOG_S3_BUCKET}/*
+    events:
+      - http:
+          method: post
+          path: blog/{postId}/attachment
+          cors: true
+          authorizer: Auth
+
+resources:
+  Resources:
+    # TODO: Add any necessary AWS resources
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'GET,OPTIONS,POST'"
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: ApiGatewayRestApi
+
+    BlogTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: postId
+            AttributeType: S
+          - AttributeName: userId
+            AttributeType: S
+          #- AttributeName: createdAt
+          #  AttributeType: S
+        KeySchema:
+          - AttributeName: postId
+            KeyType: HASH
+          - AttributeName: userId
+            KeyType: RANGE
+        TableName: ${self:provider.environment.BLOG_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        GlobalSecondaryIndexes:
+          - IndexName: ${self:provider.environment.INDEX_NAME}
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+              - AttributeName: postId
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL # What attributes will be copied to an index
+
+    AttachmentsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.BLOG_S3_BUCKET}
+        CorsConfiguration:
+          CorsRules:
+            -
+              AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+                - DELETE
+                - HEAD
+              MaxAge: 3000
+
+    BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        PolicyDocument:
+          Id: MyPolicy
+          Version: "2012-10-17"
+          Statement:
+            - Sid: PublicReadForGetBucketObjects
+              Effect: Allow
+              Principal: '*'
+              Action: 's3:GetObject'
+              Resource: 'arn:aws:s3:::${self:provider.environment.BLOG_S3_BUCKET}/*'
+        Bucket: !Ref AttachmentsBucket
